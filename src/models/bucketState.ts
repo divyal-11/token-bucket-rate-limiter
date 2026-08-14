@@ -1,4 +1,6 @@
 import { TokenBucket } from "../services/tokenBucket";
+import { redisClient } from "../config/redis";
+
 
 export interface ClientConfig {
   capacity: number;
@@ -29,3 +31,46 @@ export function setClientConfig(clientKey: string, capacity: number, refillRateP
     existingBucket.updateConfig(capacity, refillRatePerSec);
   }
 }
+
+async function saveBucketState(clientKey: string, state: BucketState): Promise<void> {
+  const key = `bucket:${clientKey}`;
+
+  await redisClient.hSet(key, {
+    tokens: state.tokens.toString(),
+    lastRefillTimeStamp: state.lastRefillTimeStamp.toString(),
+    capacity: state.capacity.toString(),
+    refillRatePerSec: state.refillRatePerSec.toString(),
+  });
+}
+
+interface BucketState {
+  tokens: number;
+  lastRefillTimeStamp: number;
+  capacity: number;
+  refillRatePerSec: number;
+}
+async function getBucketState(clientKey: string): Promise<BucketState> {
+  const key = `bucket:${clientKey}`;
+  const data = await redisClient.hGetAll(key);
+  if (Object.keys(data).length === 0) {
+    // no bucket exists yet — check for admin config, or fall back to defaults
+    const config = await redisClient.hGetAll(`config:${clientKey}`);
+    const capacity = config.capacity ? Number(config.capacity) : DEFAULT_CAPACITY;
+    const refillRatePerSec = config.refillRatePerSec ? Number(config.refillRatePerSec) : DEFAULT_REFILL_RATE;
+    return {
+      tokens: capacity,
+      lastRefillTimeStamp: Date.now(),
+      capacity,
+      refillRatePerSec,
+    };
+  }
+  return {
+    tokens: Number(data.tokens),
+    lastRefillTimeStamp: Number(data.lastRefillTimeStamp),
+    capacity: Number(data.capacity),
+    refillRatePerSec: Number(data.refillRatePerSec),
+  };
+}
+
+
+
