@@ -8,6 +8,10 @@ import * as path from "path";
 export interface ClientConfig {
   capacity: number;
   refillRatePerSec: number;
+  // Which algorithm to use for this client
+  // "token-bucket" (default) = burst-friendly, fills steadily over time
+  // "sliding-window"         = stricter, counts exact requests in last N seconds
+  mode: "token-bucket" | "sliding-window";
 }
 
 // Shape of the bucket state we persist in Redis.
@@ -38,13 +42,15 @@ const DEFAULT_REFILL_RATE = 1;
 export async function setClientConfig(
   clientKey: string,
   capacity: number,
-  refillRatePerSec: number
+  refillRatePerSec: number,
+  mode: "token-bucket" | "sliding-window" = "token-bucket" // default to token-bucket
 ): Promise<void> {
   // Step 1: Save the new config to Redis under "config:{clientKey}"
   // This ensures any NEW bucket created for this client picks up these settings
   await redisClient.hSet(`config:${clientKey}`, {
     capacity: capacity.toString(),
     refillRatePerSec: refillRatePerSec.toString(),
+    mode, // store mode as a string — "token-bucket" or "sliding-window"
   });
 
   // Step 2: Check if a live bucket already exists for this client in Redis
