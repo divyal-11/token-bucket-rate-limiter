@@ -1,4 +1,6 @@
 import { redisClient } from "../config/redis";
+import * as fs from "fs";
+import * as path from "path";
 
 // ─── Interfaces ───────────────────────────────────────────────────────────────
 
@@ -156,82 +158,32 @@ async function saveBucketState(clientKey: string, state: BucketState): Promise<v
 
 // ─── Core rate-limit operation (Phase 5 — Atomic Lua Script) ─────────────────
 
-// This Lua script runs ENTIRELY INSIDE Redis as one atomic operation.
-// Redis is single-threaded — while a Lua script is running, no other
-// Redis command can execute. This eliminates the race condition from Phase 4.
-//
-// The script does the full refill + consume + save cycle in one shot:
-//   KEYS[1] = "bucket:{clientKey}"   — where the bucket state lives
-//   KEYS[2] = "config:{clientKey}"   — where admin config lives (if set)
-//   ARGV[1] = current timestamp (ms) — passed from Node.js
-//   ARGV[2] = default capacity        — fallback if no config/bucket exists
-//   ARGV[3] = default refill rate     — fallback if no config/bucket exists
-//
-// Returns: 1 = ALLOW (token consumed), 0 = DENY (bucket empty)
-const CONSUME_TOKEN_SCRIPT = `
-local bucketKey = KEYS[1]
-local configKey = KEYS[2]
-local now       = tonumber(ARGV[1])
-local defCap    = tonumber(ARGV[2])
-local defRate   = tonumber(ARGV[3])
+// Load the Lua script from its own file (src/scripts/tokenBucket.lua).
+// Keeping it in a separate file makes it easier to read, edit, and understand
+// without wading through TypeScript. Loaded once at startup, not per-request.
+const CONSUME_TOKEN_SCRIPT = fs.readFileSync(
+  path.join(__dirname, "../scripts/tokenBucket.lua"),
+  "utf-8"
+);
 
--- Step 1: READ the bucket state from Redis
-local data = redis.call('HGETALL', bucketKey)
+/*
+  What the Lua script does (see src/scripts/tokenBucket.lua for full source):
 
-local tokens, lastTS, capacity, refillRate
+  Runs ENTIRELY INSIDE Redis as one atomic operation.
+  Redis is single-threaded — while Lua is running, no other command can execute.
+  This eliminates the read-modify-write race condition from Phase 4.
 
-if #data == 0 then
-  -- No bucket exists yet for this client.
-  -- Check if the admin set a custom config for them.
-  local cfg = redis.call('HGETALL', configKey)
-  if #cfg == 0 then
-    -- No admin config either — use defaults
-    capacity   = defCap
-    refillRate = defRate
-  else
-    -- Parse the config hash (HGETALL returns [key, val, key, val, ...])
-    for i = 1, #cfg, 2 do
-      if cfg[i] == 'capacity'        then capacity   = tonumber(cfg[i+1]) end
-      if cfg[i] == 'refillRatePerSec' then refillRate = tonumber(cfg[i+1]) end
-    end
-  end
-  -- Fresh bucket starts completely full
-  tokens = capacity
-  lastTS = now
-else
-  -- Bucket found — parse its fields
-  for i = 1, #data, 2 do
-    if data[i] == 'tokens'              then tokens     = tonumber(data[i+1]) end
-    if data[i] == 'lastRefillTimeStamp' then lastTS     = tonumber(data[i+1]) end
-    if data[i] == 'capacity'            then capacity   = tonumber(data[i+1]) end
-    if data[i] == 'refillRatePerSec'    then refillRate = tonumber(data[i+1]) end
-  end
-end
+  KEYS[1] = "bucket:{clientKey}"    — bucket state hash
+  KEYS[2] = "config:{clientKey}"    — admin config hash (may not exist)
+  ARGV[1] = current timestamp (ms)  — passed from Node.js
+  ARGV[2] = default capacity         — fallback if no config/bucket exists
+  ARGV[3] = default refill rate      — fallback if no config/bucket exists
 
--- Step 2a: REFILL — add tokens based on time elapsed since last check
-local secondsPassed = (now - lastTS) / 1000
-local tokensToAdd   = math.floor(secondsPassed * refillRate)
-tokens = math.min(capacity, tokens + tokensToAdd)
-lastTS = now
+  Returns: 1 = ALLOW, 0 = DENY
+*/
 
--- Step 2b: CONSUME — take 1 token if available
-local allowed = 0
-if tokens >= 1 then
-  tokens  = tokens - 1
-  allowed = 1
-end
 
--- Step 3: WRITE — save the updated state back to Redis
-redis.call('HSET', bucketKey,
-  'tokens',              tostring(tokens),
-  'lastRefillTimeStamp', tostring(lastTS),
-  'capacity',            tostring(capacity),
-  'refillRatePerSec',    tostring(refillRate)
-)
 
--- Return 1 = ALLOW, 0 = DENY
-return allowed
-`;
 
 // Called by GET /check for every incoming request.
 // Runs the Lua script atomically — the entire read+refill+consume+write
