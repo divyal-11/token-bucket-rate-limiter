@@ -6,6 +6,10 @@
     "lib": ["esnext"],
     "types": ["node"],
 
+    // Output Settings
+    "rootDir": "./src",
+    "outDir": "./dist",
+
     // Other Outputs
     "sourceMap": true,
     "declaration": true,
