@@ -135,32 +135,36 @@ Content-Type: application/json
 
 ---
 
-### 2. Update Client Limits (Admin Endpoint)
-Configures custom rate-limiting rules for a specific client.
+### 2. Update / Reconfigure Client Limits (Admin Endpoint)
+Dynamically configures or updates rate-limiting rules, burst sizes, and algorithm modes for a specific client in real time.
 
 - **URL:** `POST /admin/limits`
 - **Headers:** `Content-Type: application/json`
 
-#### Example Body: Token Bucket Mode
-```json
-{
-  "clientKey": "client-abc",
-  "capacity": 20,
-  "refillRatePerSec": 5,
-  "mode": "token-bucket"
-}
+#### Example A: Configure / Update Token Bucket
+```bash
+curl -X POST http://localhost:3000/admin/limits \
+  -H "Content-Type: application/json" \
+  -d '{
+    "clientKey": "client-abc",
+    "capacity": 20,
+    "refillRatePerSec": 5,
+    "mode": "token-bucket"
+  }'
 ```
 
-#### Example Body: Sliding Window Mode
-```json
-{
-  "clientKey": "client-xyz",
-  "capacity": 10,
-  "refillRatePerSec": 2,
-  "mode": "sliding-window",
-  "windowSizeMs": 5000,
-  "windowLimit": 10
-}
+#### Example B: Configure / Update Sliding Window
+```bash
+curl -X POST http://localhost:3000/admin/limits \
+  -H "Content-Type: application/json" \
+  -d '{
+    "clientKey": "client-xyz",
+    "capacity": 10,
+    "refillRatePerSec": 2,
+    "mode": "sliding-window",
+    "windowSizeMs": 60000,
+    "windowLimit": 100
+  }'
 ```
 
 #### Response (200 OK)
@@ -170,10 +174,12 @@ Configures custom rate-limiting rules for a specific client.
   "capacity": 10,
   "refillRatePerSec": 2,
   "mode": "sliding-window",
-  "windowSizeMs": 5000,
-  "windowLimit": 10
+  "windowSizeMs": 60000,
+  "windowLimit": 100
 }
 ```
+
+> **Note on Live Reconfiguration:** When updating an existing client's limits, the system automatically settles earned tokens under the *old* rate first, resets the timestamp clock, and clamps tokens to the new capacity so the client is never penalized or over-credited during live rule changes.
 
 ---
 
