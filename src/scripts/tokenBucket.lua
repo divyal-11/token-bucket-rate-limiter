@@ -48,11 +48,21 @@ else
   end
 end
 
--- Step 2a: REFILL — add tokens based on time elapsed since last check
+-- Step 2a: REFILL — calculate tokens to add
+-- IMPORTANT: Only advance lastTS by the exact amount of time accounted for
+-- by the refilled whole tokens. If 0 tokens are added (sub-millisecond requests),
+-- keep lastTS unchanged so elapsed time accumulates across rapid requests.
 local secondsPassed = (now - lastTS) / 1000
 local tokensToAdd   = math.floor(secondsPassed * refillRate)
-tokens = math.min(capacity, tokens + tokensToAdd)
-lastTS = now
+
+if tokensToAdd > 0 then
+  tokens = math.min(capacity, tokens + tokensToAdd)
+  if tokens >= capacity then
+    lastTS = now
+  else
+    lastTS = lastTS + math.floor((tokensToAdd / refillRate) * 1000)
+  end
+end
 
 -- Step 2b: CONSUME — take 1 token if available
 local allowed = 0
@@ -71,11 +81,13 @@ redis.call('HSET', bucketKey,
 
 -- Step 4: Calculate reset timestamp
 -- "Reset" = when the next token will arrive (if bucket is not full)
--- If bucket is already full (or just became full), reset is now.
 local msPerToken = math.ceil(1000 / refillRate)
 local resetAt
 if tokens < capacity then
-  resetAt = now + msPerToken  -- next token arrives in 1/refillRate seconds
+  local msSinceLastRefill = now - lastTS
+  local msUntilNext = msPerToken - msSinceLastRefill
+  if msUntilNext < 0 then msUntilNext = 0 end
+  resetAt = now + msUntilNext
 else
   resetAt = now               -- already full, no wait
 end
