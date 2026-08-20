@@ -12,6 +12,8 @@ export interface ClientConfig {
   // "token-bucket" (default) = burst-friendly, fills steadily over time
   // "sliding-window"         = stricter, counts exact requests in last N seconds
   mode: "token-bucket" | "sliding-window";
+  windowSizeMs?: number;  // only for sliding-window: how long the window lasts (ms)
+  windowLimit?: number;   // only for sliding-window: max requests allowed per window
 }
 
 // Shape of the bucket state we persist in Redis.
@@ -43,15 +45,22 @@ export async function setClientConfig(
   clientKey: string,
   capacity: number,
   refillRatePerSec: number,
-  mode: "token-bucket" | "sliding-window" = "token-bucket" // default to token-bucket
+  mode: "token-bucket" | "sliding-window" = "token-bucket",
+  windowSizeMs?: number,  // optional: explicit window duration for sliding-window mode
+  windowLimit?: number    // optional: explicit request limit for sliding-window mode
 ): Promise<void> {
   // Step 1: Save the new config to Redis under "config:{clientKey}"
-  // This ensures any NEW bucket created for this client picks up these settings
-  await redisClient.hSet(`config:${clientKey}`, {
+  const configFields: Record<string, string> = {
     capacity: capacity.toString(),
     refillRatePerSec: refillRatePerSec.toString(),
-    mode, // store mode as a string — "token-bucket" or "sliding-window"
-  });
+    mode,
+  };
+
+  // Only store sliding-window fields if they were explicitly provided
+  if (windowSizeMs !== undefined) configFields.windowSizeMs = windowSizeMs.toString();
+  if (windowLimit  !== undefined) configFields.windowLimit  = windowLimit.toString();
+
+  await redisClient.hSet(`config:${clientKey}`, configFields);
 
   // Step 2: Check if a live bucket already exists for this client in Redis
   const bucketKey = `bucket:${clientKey}`;
@@ -164,8 +173,7 @@ async function saveBucketState(clientKey: string, state: BucketState): Promise<v
 
 // ─── Phase 5: Token Bucket Lua Script ────────────────────────────────────────
 
-// Load the token bucket Lua script from file.
-// Loaded once at startup — not per request.
+// Load the token bucket Lua script from file. Loaded once at startup.
 const CONSUME_TOKEN_SCRIPT = fs.readFileSync(
   path.join(__dirname, "../scripts/tokenBucket.lua"),
   "utf-8"
@@ -180,34 +188,23 @@ const SLIDING_WINDOW_SCRIPT = fs.readFileSync(
   "utf-8"
 );
 
-/*
-  Sliding window parameters derived from existing config fields:
-    capacity       = max requests allowed per window (the limit)
-    refillRatePerSec = used to calculate window size in ms:
-      windowSizeMs = (capacity / refillRatePerSec) * 1000
-
-  Example:
-    capacity=5, refillRatePerSec=1  → 5000ms window, max 5 req → 1 req/sec
-    capacity=10, refillRatePerSec=2 → 5000ms window, max 10 req → 2 req/sec
-*/
-
-// Runs the sliding window Lua script atomically.
-// Window key: "window:{clientKey}" — a Redis Sorted Set of request timestamps.
-async function tryConsumeSlidingWindow(clientKey: string): Promise<boolean> {
-  // Read admin config to get capacity and refillRatePerSec for this client
-  const config = await redisClient.hGetAll(`config:${clientKey}`);
-  const capacity      = config.capacity      ? Number(config.capacity)      : DEFAULT_CAPACITY;
-  const refillRate    = config.refillRatePerSec ? Number(config.refillRatePerSec) : DEFAULT_REFILL_RATE;
-
-  // Derive window size: how long a "full bucket" would take to refill
-  const windowSizeMs  = Math.round((capacity / refillRate) * 1000);
+// Exported so it can be called directly if needed (e.g. for testing).
+// Takes explicit windowSizeMs and limit so the caller decides the parameters —
+// no hidden Redis reads inside this function.
+export async function tryConsumeSlidingWindow(
+  clientKey: string,
+  windowSizeMs: number,
+  limit: number
+): Promise<boolean> {
+  const windowKey = `window:${clientKey}`;
+  const now = Date.now();
 
   const result = await redisClient.eval(SLIDING_WINDOW_SCRIPT, {
-    keys: [`window:${clientKey}`],
+    keys: [windowKey],
     arguments: [
-      Date.now().toString(),      // ARGV[1] — current timestamp (ms)
-      windowSizeMs.toString(),    // ARGV[2] — window duration (ms)
-      capacity.toString(),        // ARGV[3] — max requests per window
+      now.toString(),           // ARGV[1] — current timestamp (ms)
+      windowSizeMs.toString(),  // ARGV[2] — window duration (ms)
+      limit.toString(),         // ARGV[3] — max requests per window
     ],
   });
 
@@ -217,19 +214,28 @@ async function tryConsumeSlidingWindow(clientKey: string): Promise<boolean> {
 // ─── Main rate-limit dispatcher ───────────────────────────────────────────────
 
 // Called by GET /check for every incoming request.
-// Reads the client's configured mode from Redis, then routes to the
-// correct algorithm:
+// Reads the client's mode from Redis config, then routes to the right algorithm:
 //   "token-bucket"   → tokenBucket.lua   (Phase 5 atomic Lua script)
 //   "sliding-window" → slidingWindow.lua (Phase 6 sorted-set approach)
 //
-// Defaults to "token-bucket" if no mode has been configured.
+// Defaults to "token-bucket" if no mode has been set for this client.
 export async function tryConsumeToken(clientKey: string): Promise<boolean> {
-  // Look up this client's mode (only the mode field — fast single read)
   const config = await redisClient.hGetAll(`config:${clientKey}`);
   const mode = config.mode ?? "token-bucket";
 
   if (mode === "sliding-window") {
-    return tryConsumeSlidingWindow(clientKey);
+    // Use windowSizeMs and windowLimit if admin set them explicitly,
+    // otherwise fall back to deriving from capacity and refillRatePerSec.
+    const capacity   = config.capacity      ? Number(config.capacity)         : DEFAULT_CAPACITY;
+    const refillRate = config.refillRatePerSec ? Number(config.refillRatePerSec) : DEFAULT_REFILL_RATE;
+    const windowSizeMs = config.windowSizeMs
+      ? Number(config.windowSizeMs)
+      : Math.round((capacity / refillRate) * 1000); // fallback: derive from rate
+    const limit = config.windowLimit
+      ? Number(config.windowLimit)
+      : capacity; // fallback: use capacity as the per-window request limit
+
+    return tryConsumeSlidingWindow(clientKey, windowSizeMs, limit);
   }
 
   // Default: token-bucket (atomic Lua script)
