@@ -7,7 +7,9 @@
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npm run test:race && npm run test:load",
+    "test:race": "ts-node src/racetest.ts",
+    "test:load": "ts-node src/loadtest.ts"
   },
   "keywords": [],
   "author": "",

@@ -88,12 +88,19 @@ docker run -d -p 6379:6379 --name redis redis
 npm install
 ```
 
-### 3. Start Development Server (with hot-reload)
+### 3. Environment Variables (Optional)
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | `3000` | HTTP port the Express server listens on |
+| `REDIS_URL` | `redis://localhost:6379` | Connection URI for the Redis instance |
+
+### 4. Start Development Server (with hot-reload)
 ```powershell
 npm run dev
 ```
 
 Server will start on `http://localhost:3000`.
+
 
 ---
 
@@ -183,19 +190,40 @@ curl -X POST http://localhost:3000/admin/limits \
 
 ---
 
+### 3. Health Check
+Monitors service status and Redis connectivity.
+
+- **URL:** `GET /health`
+
+#### Response (200 OK)
+```json
+{
+  "status": "UP",
+  "redis": "CONNECTED",
+  "timestamp": "2026-08-20T07:29:19.043Z"
+}
+```
+
+---
+
 ## 🧪 Testing & Validation
 
 ### Concurrency Race Test
 Fires 20 simultaneous requests against a client configured with `capacity: 1`:
 ```powershell
-npx ts-node src/racetest.ts
+npm run test:race
 # Output: ALLOW: 1, DENY: 19
 ```
 
 ### Full Load Test Suite (autocannon)
-Executes a multi-phase load test across both algorithms and validates 100-request atomicity:
+Executes a multi-phase benchmark across both algorithms and validates 100-request atomicity:
 ```powershell
-npx ts-node src/loadtest.ts
+npm run test:load
+```
+
+Or run both test suites in one go:
+```powershell
+npm test
 ```
 
 ---
