@@ -18,8 +18,10 @@
     "redis": "^6.2.1"
   },
   "devDependencies": {
+    "@types/autocannon": "^7.12.7",
     "@types/express": "^5.0.6",
     "@types/node": "^26.2.0",
+    "autocannon": "^8.0.0",
     "ts-node-dev": "^2.0.0",
     "typescript": "^6.0.3"
   }
