@@ -7,7 +7,11 @@
 -- ARGV[2] = default capacity
 -- ARGV[3] = default refill rate (tokens per second)
 --
--- Returns: 1 = ALLOW (token consumed), 0 = DENY (bucket empty)
+-- Returns an array: { allowed, remaining, capacity, resetAt_ms }
+--   allowed   = 1 (ALLOW) or 0 (DENY)
+--   remaining = tokens left AFTER this request
+--   capacity  = max tokens (the configured limit)
+--   resetAt   = ms timestamp when the bucket will next gain a token
 
 local bucketKey = KEYS[1]
 local configKey = KEYS[2]
@@ -21,21 +25,17 @@ local data = redis.call('HGETALL', bucketKey)
 local tokens, lastTS, capacity, refillRate
 
 if #data == 0 then
-  -- No bucket exists yet for this client.
-  -- Check if the admin set a custom config for them.
+  -- No bucket exists yet — check for admin config
   local cfg = redis.call('HGETALL', configKey)
   if #cfg == 0 then
-    -- No admin config either — use defaults
     capacity   = defCap
     refillRate = defRate
   else
-    -- Parse the config hash (HGETALL returns [key, val, key, val, ...])
     for i = 1, #cfg, 2 do
       if cfg[i] == 'capacity'         then capacity   = tonumber(cfg[i+1]) end
       if cfg[i] == 'refillRatePerSec' then refillRate = tonumber(cfg[i+1]) end
     end
   end
-  -- Fresh bucket starts completely full
   tokens = capacity
   lastTS = now
 else
@@ -69,5 +69,16 @@ redis.call('HSET', bucketKey,
   'refillRatePerSec',    tostring(refillRate)
 )
 
--- Return 1 = ALLOW, 0 = DENY
-return allowed
+-- Step 4: Calculate reset timestamp
+-- "Reset" = when the next token will arrive (if bucket is not full)
+-- If bucket is already full (or just became full), reset is now.
+local msPerToken = math.ceil(1000 / refillRate)
+local resetAt
+if tokens < capacity then
+  resetAt = now + msPerToken  -- next token arrives in 1/refillRate seconds
+else
+  resetAt = now               -- already full, no wait
+end
+
+-- Return array: { allowed, remaining, limit, resetAt_ms }
+return { allowed, tokens, capacity, resetAt }

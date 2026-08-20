@@ -1,56 +1,61 @@
 -- Sliding Window Rate Limiter — Atomic Lua Script
 -- Runs entirely inside Redis as one uninterruptible operation.
 --
--- HOW IT WORKS:
--- Instead of a bucket of tokens, we keep a Redis Sorted Set of timestamps.
--- Each request that gets ALLOWED adds its timestamp as an entry.
--- On every request, we first prune entries older than the window,
--- then count what's left. If count < limit → ALLOW, else → DENY.
+-- KEYS[1] = "window:{clientKey}"   — sorted set of request timestamps
+-- ARGV[1] = current timestamp (ms)
+-- ARGV[2] = window size in ms      (e.g. 5000 = 5 second window)
+-- ARGV[3] = max requests per window (the limit)
 --
--- This gives a TRUE sliding window — not a fixed 1s slot, but a rolling
--- "last N seconds" window that moves with real time.
---
--- KEYS[1] = sliding window key  e.g. "window:alice"
--- ARGV[1] = current timestamp in ms  (Date.now() from Node.js)
--- ARGV[2] = window size in ms  (e.g. 10000 for a 10-second window)
--- ARGV[3] = max requests allowed per window  (the rate limit)
---
--- Returns: 1 = ALLOW, 0 = DENY
+-- Returns an array: { allowed, remaining, limit, resetAt_ms }
+--   allowed   = 1 (ALLOW) or 0 (DENY)
+--   remaining = requests still available in this window AFTER this request
+--   limit     = the configured max requests per window
+--   resetAt   = ms timestamp when the oldest entry leaves the window
 
 local windowKey    = KEYS[1]
 local now          = tonumber(ARGV[1])
 local windowSizeMs = tonumber(ARGV[2])
 local limit        = tonumber(ARGV[3])
 
--- The start of the current window (anything before this is "aged out")
 local windowStart = now - windowSizeMs
 
--- Step 1: PRUNE — remove all entries older than the window start.
--- ZREMRANGEBYSCORE removes all members with a score between -inf and windowStart.
--- Score = timestamp, so this drops all requests that happened before the window.
+-- Step 1: PRUNE — remove all entries older than the window start
 redis.call("ZREMRANGEBYSCORE", windowKey, "-inf", windowStart)
 
--- Step 2: COUNT — how many requests happened inside the current window?
--- ZCARD returns the number of members remaining in the sorted set after pruning.
+-- Step 2: COUNT — how many requests are in the current window?
 local count = redis.call("ZCARD", windowKey)
 
+-- Step 3: ALLOW or DENY
 local allowed = 0
 if count < limit then
-  -- Step 3: RECORD — log this request's timestamp into the sorted set.
-  -- We use now as the score (for range queries) but need a UNIQUE member value.
-  -- Why unique? Sorted Sets don't allow duplicate members — if two requests
-  -- arrive in the exact same millisecond, the second ZADD would overwrite
-  -- the first instead of adding a new entry. Appending math.random() ensures
-  -- every entry is unique while the score (now) stays accurate for pruning.
+  -- Record this request's timestamp as a unique sorted set member.
+  -- Appending math.random() prevents duplicate-member collisions if two
+  -- requests arrive at the exact same millisecond.
   redis.call("ZADD", windowKey, now, now .. "-" .. math.random())
   allowed = 1
 end
 
--- Step 4: PEXPIRE — set the key to auto-delete after windowSizeMs of inactivity.
--- Without this, Redis would hold the sorted set forever for silent clients.
--- PEXPIRE resets the TTL on every request, so the key only expires if the
--- client goes completely quiet for a full window duration.
+-- Step 4: PEXPIRE — auto-delete key after a full window of inactivity
 redis.call("PEXPIRE", windowKey, windowSizeMs)
 
--- Return 1 = ALLOW, 0 = DENY
-return allowed
+-- Step 5: Calculate remaining requests in this window
+local remaining
+if allowed == 1 then
+  remaining = limit - count - 1  -- we just consumed one slot
+else
+  remaining = 0                  -- already at/over limit
+end
+
+-- Step 6: Calculate resetAt — when does the OLDEST entry leave the window?
+-- The oldest entry is at index 0 in the sorted set (lowest score = earliest timestamp).
+-- Once it ages out, one more request slot opens up.
+local oldest = redis.call("ZRANGE", windowKey, 0, 0, "WITHSCORES")
+local resetAt
+if #oldest > 0 then
+  resetAt = tonumber(oldest[2]) + windowSizeMs  -- oldest_ts + window = when it expires
+else
+  resetAt = now + windowSizeMs  -- empty window, resets after a full window duration
+end
+
+-- Return array: { allowed, remaining, limit, resetAt_ms }
+return { allowed, remaining, limit, resetAt }
