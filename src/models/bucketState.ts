@@ -162,50 +162,87 @@ async function saveBucketState(clientKey: string, state: BucketState): Promise<v
   });
 }
 
-// ─── Core rate-limit operation (Phase 5 — Atomic Lua Script) ─────────────────
+// ─── Phase 5: Token Bucket Lua Script ────────────────────────────────────────
 
-// Load the Lua script from its own file (src/scripts/tokenBucket.lua).
-// Keeping it in a separate file makes it easier to read, edit, and understand
-// without wading through TypeScript. Loaded once at startup, not per-request.
+// Load the token bucket Lua script from file.
+// Loaded once at startup — not per request.
 const CONSUME_TOKEN_SCRIPT = fs.readFileSync(
   path.join(__dirname, "../scripts/tokenBucket.lua"),
   "utf-8"
 );
 
+// ─── Phase 6: Sliding Window Lua Script ──────────────────────────────────────
+
+// Load the sliding window Lua script from file.
+// Uses a Redis Sorted Set of timestamps instead of a token counter.
+const SLIDING_WINDOW_SCRIPT = fs.readFileSync(
+  path.join(__dirname, "../scripts/slidingWindow.lua"),
+  "utf-8"
+);
+
 /*
-  What the Lua script does (see src/scripts/tokenBucket.lua for full source):
+  Sliding window parameters derived from existing config fields:
+    capacity       = max requests allowed per window (the limit)
+    refillRatePerSec = used to calculate window size in ms:
+      windowSizeMs = (capacity / refillRatePerSec) * 1000
 
-  Runs ENTIRELY INSIDE Redis as one atomic operation.
-  Redis is single-threaded — while Lua is running, no other command can execute.
-  This eliminates the read-modify-write race condition from Phase 4.
-
-  KEYS[1] = "bucket:{clientKey}"    — bucket state hash
-  KEYS[2] = "config:{clientKey}"    — admin config hash (may not exist)
-  ARGV[1] = current timestamp (ms)  — passed from Node.js
-  ARGV[2] = default capacity         — fallback if no config/bucket exists
-  ARGV[3] = default refill rate      — fallback if no config/bucket exists
-
-  Returns: 1 = ALLOW, 0 = DENY
+  Example:
+    capacity=5, refillRatePerSec=1  → 5000ms window, max 5 req → 1 req/sec
+    capacity=10, refillRatePerSec=2 → 5000ms window, max 10 req → 2 req/sec
 */
 
+// Runs the sliding window Lua script atomically.
+// Window key: "window:{clientKey}" — a Redis Sorted Set of request timestamps.
+async function tryConsumeSlidingWindow(clientKey: string): Promise<boolean> {
+  // Read admin config to get capacity and refillRatePerSec for this client
+  const config = await redisClient.hGetAll(`config:${clientKey}`);
+  const capacity      = config.capacity      ? Number(config.capacity)      : DEFAULT_CAPACITY;
+  const refillRate    = config.refillRatePerSec ? Number(config.refillRatePerSec) : DEFAULT_REFILL_RATE;
 
+  // Derive window size: how long a "full bucket" would take to refill
+  const windowSizeMs  = Math.round((capacity / refillRate) * 1000);
 
-
-// Called by GET /check for every incoming request.
-// Runs the Lua script atomically — the entire read+refill+consume+write
-// happens as ONE indivisible Redis operation. No other request can
-// interleave between the read and the write, so the race condition is gone.
-export async function tryConsumeToken(clientKey: string): Promise<boolean> {
-  const result = await redisClient.eval(CONSUME_TOKEN_SCRIPT, {
-    keys: [`bucket:${clientKey}`, `config:${clientKey}`],
+  const result = await redisClient.eval(SLIDING_WINDOW_SCRIPT, {
+    keys: [`window:${clientKey}`],
     arguments: [
-      Date.now().toString(),           // ARGV[1] — current time
-      DEFAULT_CAPACITY.toString(),     // ARGV[2] — default capacity
-      DEFAULT_REFILL_RATE.toString(),  // ARGV[3] — default refill rate
+      Date.now().toString(),      // ARGV[1] — current timestamp (ms)
+      windowSizeMs.toString(),    // ARGV[2] — window duration (ms)
+      capacity.toString(),        // ARGV[3] — max requests per window
     ],
   });
 
-  // Lua returns 1 (ALLOW) or 0 (DENY) — cast to boolean
   return result === 1;
 }
+
+// ─── Main rate-limit dispatcher ───────────────────────────────────────────────
+
+// Called by GET /check for every incoming request.
+// Reads the client's configured mode from Redis, then routes to the
+// correct algorithm:
+//   "token-bucket"   → tokenBucket.lua   (Phase 5 atomic Lua script)
+//   "sliding-window" → slidingWindow.lua (Phase 6 sorted-set approach)
+//
+// Defaults to "token-bucket" if no mode has been configured.
+export async function tryConsumeToken(clientKey: string): Promise<boolean> {
+  // Look up this client's mode (only the mode field — fast single read)
+  const config = await redisClient.hGetAll(`config:${clientKey}`);
+  const mode = config.mode ?? "token-bucket";
+
+  if (mode === "sliding-window") {
+    return tryConsumeSlidingWindow(clientKey);
+  }
+
+  // Default: token-bucket (atomic Lua script)
+  const result = await redisClient.eval(CONSUME_TOKEN_SCRIPT, {
+    keys: [`bucket:${clientKey}`, `config:${clientKey}`],
+    arguments: [
+      Date.now().toString(),
+      DEFAULT_CAPACITY.toString(),
+      DEFAULT_REFILL_RATE.toString(),
+    ],
+  });
+
+  return result === 1;
+}
+
 
