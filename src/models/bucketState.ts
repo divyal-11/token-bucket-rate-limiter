@@ -16,6 +16,15 @@ export interface ClientConfig {
   windowLimit?: number;   // only for sliding-window: max requests allowed per window
 }
 
+// Result returned by tryConsumeToken — used to set X-RateLimit-* response headers.
+// Both token-bucket and sliding-window modes return this same shape.
+export interface RateLimitResult {
+  allowed: boolean;    // true = ALLOW, false = DENY
+  remaining: number;   // requests/tokens left after this one
+  limit: number;       // max allowed (capacity or windowLimit)
+  resetAt: number;     // ms timestamp when the limit resets or next slot opens
+}
+
 // Shape of the bucket state we persist in Redis.
 // These 4 numbers are everything needed to fully recreate a bucket's position —
 // no class instance needed, just plain data stored as a Redis Hash.
@@ -195,20 +204,26 @@ export async function tryConsumeSlidingWindow(
   clientKey: string,
   windowSizeMs: number,
   limit: number
-): Promise<boolean> {
+): Promise<RateLimitResult> {
   const windowKey = `window:${clientKey}`;
   const now = Date.now();
 
-  const result = await redisClient.eval(SLIDING_WINDOW_SCRIPT, {
+  // Lua returns a 4-element array: [allowed, remaining, limit, resetAt_ms]
+  const raw = await redisClient.eval(SLIDING_WINDOW_SCRIPT, {
     keys: [windowKey],
     arguments: [
       now.toString(),           // ARGV[1] — current timestamp (ms)
       windowSizeMs.toString(),  // ARGV[2] — window duration (ms)
       limit.toString(),         // ARGV[3] — max requests per window
     ],
-  });
+  }) as [number, number, number, number];
 
-  return result === 1;
+  return {
+    allowed:   raw[0] === 1,
+    remaining: raw[1],
+    limit:     raw[2],
+    resetAt:   raw[3],
+  };
 }
 
 // ─── Main rate-limit dispatcher ───────────────────────────────────────────────
@@ -218,37 +233,42 @@ export async function tryConsumeSlidingWindow(
 //   "token-bucket"   → tokenBucket.lua   (Phase 5 atomic Lua script)
 //   "sliding-window" → slidingWindow.lua (Phase 6 sorted-set approach)
 //
+// Returns a RateLimitResult with allowed + header metadata (remaining, limit, resetAt).
 // Defaults to "token-bucket" if no mode has been set for this client.
-export async function tryConsumeToken(clientKey: string): Promise<boolean> {
+export async function tryConsumeToken(clientKey: string): Promise<RateLimitResult> {
   const config = await redisClient.hGetAll(`config:${clientKey}`);
   const mode = config.mode ?? "token-bucket";
 
   if (mode === "sliding-window") {
-    // Use windowSizeMs and windowLimit if admin set them explicitly,
-    // otherwise fall back to deriving from capacity and refillRatePerSec.
-    const capacity   = config.capacity      ? Number(config.capacity)         : DEFAULT_CAPACITY;
+    const capacity   = config.capacity         ? Number(config.capacity)         : DEFAULT_CAPACITY;
     const refillRate = config.refillRatePerSec ? Number(config.refillRatePerSec) : DEFAULT_REFILL_RATE;
     const windowSizeMs = config.windowSizeMs
       ? Number(config.windowSizeMs)
-      : Math.round((capacity / refillRate) * 1000); // fallback: derive from rate
+      : Math.round((capacity / refillRate) * 1000);
     const limit = config.windowLimit
       ? Number(config.windowLimit)
-      : capacity; // fallback: use capacity as the per-window request limit
+      : capacity;
 
     return tryConsumeSlidingWindow(clientKey, windowSizeMs, limit);
   }
 
   // Default: token-bucket (atomic Lua script)
-  const result = await redisClient.eval(CONSUME_TOKEN_SCRIPT, {
+  // Lua returns a 4-element array: [allowed, remaining, capacity, resetAt_ms]
+  const raw = await redisClient.eval(CONSUME_TOKEN_SCRIPT, {
     keys: [`bucket:${clientKey}`, `config:${clientKey}`],
     arguments: [
       Date.now().toString(),
       DEFAULT_CAPACITY.toString(),
       DEFAULT_REFILL_RATE.toString(),
     ],
-  });
+  }) as [number, number, number, number];
 
-  return result === 1;
+  return {
+    allowed:   raw[0] === 1,
+    remaining: raw[1],
+    limit:     raw[2],
+    resetAt:   raw[3],
+  };
 }
 
 
