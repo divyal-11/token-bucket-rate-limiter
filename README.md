@@ -194,7 +194,7 @@ npx ts-node src/loadtest.ts
 
 ---
 
-## 💡 Deep-Dive Design Decisions & Interview Notes
+## 💡 Architectural & Design Decisions
 
 ### 1. Why Config vs. State Separation?
 - **`config:{clientKey}`** stores admin settings (`capacity`, `mode`, etc.).
