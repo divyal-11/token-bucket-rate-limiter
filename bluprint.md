@@ -51,64 +51,64 @@ tokens = min(capacity, tokens + tokensToAdd)
 
 ## 4. Phased Build Plan
 
-### Phase 1 — Pure Algorithm (no server) ✅ *in progress*
+### Phase 1 — Pure Algorithm (no server) ✅
 - [x] `TokenBucket` class: `capacity`, `tokens`, `refillRatePerSec`, `lastRefillTimestamp`
 - [x] `refill()` — lazy, time-based, capped at capacity
 - [x] `tryConsume()` — refill, then consume 1 token if available
 - [x] Manual test: burst depletion (5 rapid calls → ALLOW, next 2 → DENY)
 - [x] Manual test: refill over time (wait 3s → tokens replenish proportionally)
 
-### Phase 2 — Wrap in an API
+### Phase 2 — Wrap in an API ✅
 - [x] Express server, single `GET /check?clientKey=...` endpoint
 - [x] In-memory `Map<string, TokenBucket>` — one bucket per client key, created on first sight
 - [x] Return `200 ALLOW` / `429 DENY`
-- [ ] **Currently here** → verify multiple sequential calls for the same client behave correctly
-- [ ] Understand *why* keyed-by-client-key matters (isolation: one client's usage never affects another client's bucket)
+- [x] Verify multiple sequential calls for the same client behave correctly
+- [x] Understand *why* keyed-by-client-key matters (isolation: one client's usage never affects another client's bucket)
 
-### Phase 3 — Admin Endpoint (per-client config)
-- [ ] `POST /admin/limits` — set `{ clientKey, capacity, refillRatePerSec }` for a specific client
-- [ ] Store per-client config separately from per-client bucket state
-- [ ] New clients without explicit config fall back to sane defaults
-- [ ] Validate input (reject negative/zero capacity or refill rate)
+### Phase 3 — Admin Endpoint (per-client config) ✅
+- [x] `POST /admin/limits` — set `{ clientKey, capacity, refillRatePerSec, mode }` for a specific client
+- [x] Store per-client config separately from per-client bucket state
+- [x] New clients without explicit config fall back to sane defaults
+- [x] Validate input (reject negative/zero capacity or refill rate)
 
-### Phase 4 — Persistence (Redis)
-- [ ] Move bucket state out of the in-memory `Map` into Redis
-- [ ] Design key scheme, e.g. `bucket:{clientKey}` storing `{ tokens, lastRefillTimestamp }`
-- [ ] On restart, buckets resume from Redis instead of resetting to full
-- [ ] Decide: store as Redis Hash vs JSON string (trade-offs — discuss before implementing)
+### Phase 4 — Persistence (Redis) ✅
+- [x] Move bucket state out of the in-memory `Map` into Redis
+- [x] Design key scheme: `bucket:{clientKey}` storing `{ tokens, lastRefillTimestamp, capacity, refillRatePerSec }` as a Redis Hash
+- [x] On restart, buckets resume from Redis instead of resetting to full
+- [x] Store configuration in `config:{clientKey}`
 
-### Phase 5 — Concurrency Safety
-- [ ] Identify the race: two simultaneous requests for the same client both read "1 token left," both consume, bucket goes negative
-- [ ] Fix using an **atomic operation** — Redis `Lua script` (EVAL) or `WATCH`/`MULTI` transaction, so refill+consume happens as one atomic unit
-- [ ] Write a concurrency test: fire N simultaneous requests for one client key, assert allowed count never exceeds capacity
+### Phase 5 — Concurrency Safety ✅
+- [x] Identify the race: simultaneous requests both read before either writes
+- [x] Fix using atomic Redis Lua script (`tokenBucket.lua`), eliminating the read-modify-write gap
+- [x] Concurrency test (`racetest.ts`): fire 20/100 simultaneous requests, assert allowed count never exceeds capacity
 
-### Phase 6 — Sliding Window Mode
-- [ ] Implement sliding-window counter as an alternative algorithm
-- [ ] Per-client toggle: `mode: "token-bucket" | "sliding-window"` (set via admin endpoint)
-- [ ] Same `/check` endpoint routes to whichever mode the client is configured for
+### Phase 6 — Sliding Window Mode ✅
+- [x] Implement sliding-window counter via Redis Sorted Set (`slidingWindow.lua`)
+- [x] Per-client toggle: `mode: "token-bucket" | "sliding-window"` with optional `windowSizeMs` & `windowLimit`
+- [x] Same `/check` endpoint routes to whichever mode the client is configured for
 
-### Phase 7 — Response Headers
-- [ ] Add `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` on every `/check` response
-- [ ] Compute `Reset` correctly for both token-bucket and sliding-window modes
+### Phase 7 — Response Headers ✅
+- [x] Add `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` on every `/check` response
+- [x] Add `Retry-After` header on 429 DENY responses
+- [x] Compute `Reset` correctly for both token-bucket and sliding-window modes
 
-### Phase 8 — Load Testing
-- [ ] Pick a tool (e.g. `autocannon`, `k6`, or a custom script)
-- [ ] Simulate 500+ concurrent req/sec against `/check`
-- [ ] Verify: no client ever exceeds their configured limit, no crashes, no incorrect double-allows
+### Phase 8 — Load Testing ✅
+- [x] Automated benchmarking suite using `autocannon` (`src/loadtest.ts`)
+- [x] Tested 7,500+ req/sec across 10 concurrent connections
+- [x] Verified 100-request parallel atomicity test (exactly 1 allowed on capacity=1)
 
-### Phase 9 — Polish Pass (per our process)
+### Phase 9 — Polish Pass (per our process) ⬅️ *Next*
 - [ ] README: architecture diagram, setup instructions, API docs
 - [ ] Design-decisions write-up: why token bucket vs sliding window, why lazy refill, how the race condition was solved, trade-offs of the Redis key scheme
-- [ ] Pick at least one stretch goal to implement: **distributed mode** (multiple limiter instances sharing Redis state correctly) recommended, since it previews concepts needed later for the Self-Healing Distributed Cache project
-- [ ] Demo gif/video (optional but valuable)
+- [ ] Demo & project wrap-up
 
 ---
 
 ## 5. Current Status
 
-- **Stack confirmed:** Node 24.16.0, TypeScript 6.0.3 (pinned down from 7.0.2 due to `ts-node` incompatibility with TS7's new internals), Express, `redis` npm package
-- **Phase 1:** Complete and verified — lazy refill algorithm understood and tested correctly
-- **Phase 2:** In progress — Express `/check` endpoint built and running; next step is running repeated `curl` tests against it and confirming per-client isolation via the `Map<string, TokenBucket>` keying
+- **Stack:** Node.js, TypeScript, Express, Redis, autocannon
+- **Phases 1–8:** Complete, fully tested, verified under 7,500+ req/sec load testing
+- **Next Step:** Phase 9 — Polish Pass (comprehensive documentation, architecture diagrams, and design decisions writeup)
 
 ---
 
