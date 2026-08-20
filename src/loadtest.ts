@@ -75,6 +75,23 @@ async function main() {
   });
   await runTest("Sliding Window — limit=10 per 2000ms");
 
+  // ── Test C: High-concurrency atomicity verification ─────────────────────
+  console.log("\n[C] Verifying atomicity under 100 simultaneous requests (capacity=1)...");
+  await setConfig({ capacity: 1, refillRatePerSec: 1, mode: "token-bucket" });
+  const promises = [];
+  for (let i = 0; i < 100; i++) {
+    promises.push(fetch(`${SERVER}/check?clientKey=${CLIENT_KEY}`).then(r => r.json() as Promise<{ result: string }>));
+  }
+  const results = await Promise.all(promises);
+  const allowCount = results.filter(r => r.result === "ALLOW").length;
+  const denyCount  = results.filter(r => r.result === "DENY").length;
+  console.log(`  Results: ALLOW: ${allowCount}, DENY: ${denyCount}`);
+  if (allowCount === 1) {
+    console.log("  ✅ ATOMICITY CONFIRMED: Exactly 1 request allowed out of 100 simultaneous requests!");
+  } else {
+    console.log(`  ❌ RACE CONDITION DETECTED: ${allowCount} requests allowed!`);
+  }
+
   console.log("\n╔══════════════════════════════════════════════════════════╗");
   console.log("║                    Load Test Complete                    ║");
   console.log("╚══════════════════════════════════════════════════════════╝\n");

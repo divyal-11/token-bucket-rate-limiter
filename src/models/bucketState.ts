@@ -183,6 +183,7 @@ async function saveBucketState(clientKey: string, state: BucketState): Promise<v
 // ─── Phase 5: Token Bucket Lua Script ────────────────────────────────────────
 
 // Load the token bucket Lua script from file. Loaded once at startup.
+// Features atomic lazy refill with sub-millisecond precision.
 const CONSUME_TOKEN_SCRIPT = fs.readFileSync(
   path.join(__dirname, "../scripts/tokenBucket.lua"),
   "utf-8"
