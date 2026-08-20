@@ -1,10 +1,10 @@
-# Distributed Token Bucket & Sliding Window Rate Limiter
+# Distributed Token Bucket and Sliding Window Rate Limiter
 
 A high-performance, concurrency-safe, networked rate-limiting service built with **Node.js**, **TypeScript**, **Express**, and **Redis**. Designed as an independent infrastructure service that upstream microservices call to enforce per-client traffic limits.
 
 ---
 
-## 🚀 Performance Benchmarks (autocannon)
+## Performance Benchmarks (autocannon)
 
 - **Throughput:** ~7,800 – 7,900 requests/second
 - **Average Latency:** 1.00 ms (p99: 1–2 ms)
@@ -12,7 +12,7 @@ A high-performance, concurrency-safe, networked rate-limiting service built with
 
 ---
 
-## 🏗️ Architecture & Data Flow
+## Architecture and Data Flow
 
 ```
    [ Client Request ]
@@ -53,7 +53,7 @@ A high-performance, concurrency-safe, networked rate-limiting service built with
 
 ---
 
-## 🌟 Key Features
+## Key Features
 
 1. **Dual Algorithm Support (Per-Client Selection):**
    - **Token Bucket:** Allows controlled bursts up to `capacity`, steadily refilling at `refillRatePerSec`.
@@ -72,7 +72,7 @@ A high-performance, concurrency-safe, networked rate-limiting service built with
 
 ---
 
-## 🛠️ Quickstart & Setup
+## Quickstart and Setup
 
 ### Prerequisites
 - Node.js (v18+ or v24+)
@@ -101,10 +101,9 @@ npm run dev
 
 Server will start on `http://localhost:3000`.
 
-
 ---
 
-## 📡 API Reference
+## API Reference
 
 ### 1. Check Rate Limit
 Checks whether a request from a client is allowed or rate-limited.
@@ -206,7 +205,7 @@ Monitors service status and Redis connectivity.
 
 ---
 
-## 🧪 Testing & Validation
+## Testing and Validation
 
 ### Concurrency Race Test
 Fires 20 simultaneous requests against a client configured with `capacity: 1`:
@@ -228,7 +227,7 @@ npm test
 
 ---
 
-## 💡 Architectural & Design Decisions
+## Architectural and Design Decisions
 
 ### 1. Why Config vs. State Separation?
 - **`config:{clientKey}`** stores admin settings (`capacity`, `mode`, etc.).
@@ -259,7 +258,7 @@ npm test
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 ├── src/
@@ -281,7 +280,6 @@ npm test
 │   ├── index.ts                  # Express server entrypoint
 │   ├── racetest.ts               # Parallel concurrency race condition test
 │   └── loadtest.ts               # Autocannon automated benchmark suite
-├── bluprint.md                   # Project roadmap and phase tracking
 ├── package.json
 └── tsconfig.json
 ```
